@@ -1,6 +1,5 @@
 import prompt
 
-
 COMMANDS = (
     "<command> exit - выйти из программы\n"
     "<command> help - справочная информация"
