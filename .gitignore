@@ -1,6 +1,9 @@
 .venv
 dist/
 __pycache__/
+.ruff_cache/
 *.egg-info
+.DS_Store
+/.db-*.tmp
 /db_meta.json
 /data/

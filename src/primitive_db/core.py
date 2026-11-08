@@ -1,10 +1,11 @@
+from primitive_db.constants import COLUMN_TYPES, ID_COLUMN, ID_TYPE, INVALID_VALUE
+from primitive_db.decorators import confirm_action, handle_db_errors, log_time
 from primitive_db.utils import load_table_data
 
-COLUMN_TYPES = {"int": int, "str": str, "bool": bool}
-INVALID_VALUE = "Некорректное значение: {}. Попробуйте снова."
 
-
+@handle_db_errors
 def create_table(metadata, table_name, columns):
+    """Добавить в метаданные схему таблицы с автоматическим столбцом ID."""
     if table_name in metadata:
         print(f'Ошибка: Таблица "{table_name}" уже существует.')
         return metadata
@@ -12,46 +13,52 @@ def create_table(metadata, table_name, columns):
         print(INVALID_VALUE.format(table_name))
         return metadata
 
-    table_columns = ["ID:int"]
+    table_columns = [f"{ID_COLUMN}:{ID_TYPE}"]
     column_names = set()
     for column in columns:
         name, _, column_type = column.partition(":")
         name = name.strip()
-        if name.casefold() == "id":
-            name = "ID"
+        if name.casefold() == ID_COLUMN.casefold():
+            name = ID_COLUMN
         if (
             not name
             or column_type not in COLUMN_TYPES
             or name in column_names
-            or (name == "ID" and column_type != "int")
+            or (name == ID_COLUMN and column_type != ID_TYPE)
         ):
             print(INVALID_VALUE.format(column))
             return metadata
 
         column_names.add(name)
-        if name != "ID":
+        if name != ID_COLUMN:
             table_columns.append(f"{name}:{column_type}")
 
     metadata[table_name] = table_columns
     return metadata
 
 
+@handle_db_errors
+@confirm_action("удаление таблицы")
 def drop_table(metadata, table_name):
+    """После подтверждения удалить схему таблицы из метаданных."""
     if table_name not in metadata:
-        print(f'Ошибка: Таблица "{table_name}" не существует.')
-        return metadata
+        raise KeyError(f'Таблица "{table_name}" не существует.')
 
     del metadata[table_name]
     return metadata
 
 
+@handle_db_errors
 def table_schema(metadata, table_name):
+    """Вернуть словарь с именами столбцов и их типами."""
     if table_name not in metadata:
-        raise ValueError(f'Таблица "{table_name}" не существует.')
+        raise KeyError(f'Таблица "{table_name}" не существует.')
     return dict(column.split(":", 1) for column in metadata[table_name])
 
 
+@handle_db_errors
 def validate_values(schema, values):
+    """Проверить наличие столбцов и соответствие значений схеме."""
     for column, value in values.items():
         if column not in schema:
             raise ValueError(f'Столбец "{column}" не существует.')
@@ -60,39 +67,65 @@ def validate_values(schema, values):
             raise ValueError(
                 f'Для столбца "{column}" ожидается значение типа {column_type}.'
             )
+    return True
 
 
+@handle_db_errors
+@log_time
 def insert(metadata, table_name, values, *, table_data=None):
+    """Добавить строку с новым ID и вернуть обновлённый список строк."""
     schema = table_schema(metadata, table_name)
-    columns = [column for column in schema if column != "ID"]
+    if schema is None:
+        return None
+    columns = [column for column in schema if column != ID_COLUMN]
     if len(values) != len(columns):
         raise ValueError(
             f"Ожидается значений: {len(columns)}, получено: {len(values)}."
         )
 
     record = dict(zip(columns, values, strict=True))
-    validate_values(schema, record)
+    if not validate_values(schema, record):
+        return None
     if table_data is None:
         table_data = load_table_data(table_name)
-    new_id = max((row["ID"] for row in table_data), default=0) + 1
-    return [*table_data, {"ID": new_id, **record}]
+    new_id = max((row[ID_COLUMN] for row in table_data), default=0) + 1
+    return [*table_data, {ID_COLUMN: new_id, **record}]
 
 
 def _matches(row, where_clause):
+    """Проверить, удовлетворяет ли строка всем условиям фильтра."""
     return all(
         column in row and type(row[column]) is type(value) and row[column] == value
         for column, value in where_clause.items()
     )
 
 
-def select(table_data, where_clause=None):
+def matching_rows(table_data, where_clause):
+    """Выбрать строки по условию или вернуть все строки."""
     if where_clause is None:
         return table_data
     return [row for row in table_data if _matches(row, where_clause)]
 
 
+@handle_db_errors
+@log_time
+def select(table_data, where_clause=None, *, cache_result=None):
+    """Вернуть подходящие строки, используя кэш при повторном запросе."""
+    if cache_result is None:
+        return matching_rows(table_data, where_clause)
+
+    key = None
+    if where_clause is not None:
+        key = tuple(
+            (column, type(value), value) for column, value in where_clause.items()
+        )
+    return cache_result(key, lambda: matching_rows(table_data, where_clause))
+
+
+@handle_db_errors
 def update(table_data, set_clause, where_clause):
-    if "ID" in set_clause:
+    """Заменить значения полей в строках, подходящих под условие."""
+    if ID_COLUMN in set_clause:
         raise ValueError("Столбец ID нельзя менять.")
     if not where_clause:
         raise ValueError("Укажите условие where.")
@@ -102,7 +135,10 @@ def update(table_data, set_clause, where_clause):
     ]
 
 
+@handle_db_errors
+@confirm_action("удаление записи")
 def delete(table_data, where_clause):
+    """После подтверждения исключить строки, подходящие под условие."""
     if not where_clause:
         raise ValueError("Укажите условие where.")
     return [row for row in table_data if not _matches(row, where_clause)]
